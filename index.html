@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pizarra de Hitos — Post‑its (Drive Sync)</title>
+  <style>
+    :root{--bg:#f6f0e1;--cork:#e0cda6;--toolbar-bg:rgba(0,0,0,0.6);--toolbar-color:#fff}
+    html,body{height:100%;margin:0;font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial}
+    body{background:linear-gradient(180deg,#f7f3ea 0%, #efe7cf 100%);display:flex;flex-direction:column}
+    .toolbar{display:flex;gap:8px;align-items:center;padding:10px;background:var(--toolbar-bg);color:var(--toolbar-color);backdrop-filter:blur(4px)}
+    .toolbar .left{display:flex;gap:8px;align-items:center}
+    .toolbar button, .toolbar input[type=file], .toolbar select{background:transparent;border:1px solid rgba(255,255,255,0.18);color:var(--toolbar-color);padding:8px 10px;border-radius:8px;cursor:pointer}
+    .toolbar button.primary{background:#ffd54a;color:#222;border:0}
+    .toolbar .title{font-weight:700;margin-right:12px}
+    .board-wrap{flex:1;display:flex}
+    .board{position:relative;flex:1;margin:16px;border-radius:12px;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.15)}
+    .board .cork{position:absolute;inset:0;background-image:linear-gradient(transparent 0 30px, rgba(0,0,0,0.02) 30px),linear-gradient(90deg, rgba(255,255,255,0.02) 0 30px, transparent 30px);background-color:var(--cork);background-size:100% 100%;}
+    .note{position:absolute;width:210px;min-height:120px;padding:12px;border-radius:8px;box-shadow:0 6px 12px rgba(0,0,0,0.18);cursor:grab;user-select:none;display:flex;flex-direction:column}
+    .note:active{cursor:grabbing}
+    .note .meta{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+    .note .meta .date{font-size:12px;opacity:0.75}
+    .note .content{flex:1;outline:0;border:0;background:transparent;resize:none;font-size:14px}
+    .note .controls{display:flex;gap:6px;margin-top:8px;justify-content:flex-end}
+    .note .controls button{padding:6px;border-radius:6px;border:0;font-size:13px}
+    .c-yellow{background:#fff88f}
+    .c-pink{background:#ffd0e0}
+    .c-green{background:#d6ffd0}
+    .c-blue{background:#d6f0ff}
+    .c-orange{background:#ffdcc2}
+    .help{padding:8px 12px;font-size:13px;color:#333;background:linear-gradient(180deg,#fff 0,#f5f5f5 100%);border-top:1px solid rgba(0,0,0,0.04)}
+    @media (min-width:1200px){.toolbar{padding:12px 24px}.note{width:240px}}
+    .big{padding:12px 16px;font-size:16px}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="left">
+      <span class="title">Pizarra de Hitos (Drive)</span>
+      <button id="add" class="primary big">+ Nuevo post‑it</button>
+      <label>Color
+        <select id="colorSelect">
+          <option value="c-yellow">Amarillo</option>
+          <option value="c-pink">Rosa</option>
+          <option value="c-green">Verde</option>
+          <option value="c-blue">Azul</option>
+          <option value="c-orange">Naranja</option>
+        </select>
+      </label>
+      <button id="save" title="Guardar localmente">Guardar</button>
+      <button id="download" title="Descargar JSON">Descargar</button>
+      <label style="display:inline-flex;align-items:center">
+        <input id="importFile" type="file" accept="application/json" style="display:none" />
+        <button id="importBtn">Importar</button>
+      </label>
+      <button id="clear">Limpiar</button>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+      <button id="signin">Conectar a Drive</button>
+      <button id="signout" style="display:none">Desconectar</button>
+      <button id="fullscreen">Pantalla completa</button>
+      <button id="helpBtn">Ayuda</button>
+    </div>
+  </div>
+
+  <div class="board-wrap">
+    <div id="board" class="board">
+      <div class="cork"></div>
+    </div>
+  </div>
+
+  <div class="help" id="helpPanel">Consejos: pulsa "+ Nuevo post-it" para crear notas. Doble clic para editar, arrastra para mover. Usa "Guardar" para guardar en el navegador.<br>Conecta a Drive para sincronizar automáticamente entre dispositivos.</div>
+
+  <script>
+  /***** CONFIG: debes rellenar estos valores antes de usar *****/
+  const CLIENT_ID = '130042546863-8ob86p2mfqh9u9nmv32fhpnhsqmbk1g7.apps.googleusercontent.com';
+  const API_KEY = ''; // opcional, no estrictamente necesario para este flujo
+  const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+  const FILE_NAME = 'pizarra-hitos.json'; // nombre del archivo en Drive
+  /***********************************************************/
+
+  // gapi: Google API client loader
+  let gapiInited = false;
+  let gisInited = false;
+  let tokenClient;
+  let accessToken = null;
+  let driveFileId = null;
+  let driveLastModified = null;
+  let pollingInterval = 15000; // 15s
+  let pollingTimer = null;
+
+  // Load gapi client lib dynamically
+  function loadGapi(){
+    return new Promise((res,rej)=>{
+      if(window.gapi){gapiInited=true; return res();}
+      const s = document.createElement('script'); s.src='https://apis.google.com/js/api.js'; s.onload=()=>{gapi.load('client', ()=>{gapiInited=true; res();});}; s.onerror=rej; document.head.appendChild(s);
+    });
+  }
+
+  // Load token client (Google Identity Services)
+  function loadGis(){
+    return new Promise((res,rej)=>{
+      if(window.google && window.google.accounts && window.google.accounts.oauth2){gisInited=true; return res();}
+      const s = document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.onload=()=>{gisInited=true; res();}; s.onerror=rej; document.head.appendChild(s);
+    });
+  }
+
+  async function initGoogle(){
+    await loadGapi();
+    await loadGis();
+    // Init gapi client with Drive v3
+    await gapi.client.init({apiKey: API_KEY, discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']});
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID,
+      scope: SCOPES,
+      callback: (tokenResponse)=>{
+        if(tokenResponse.error){ console.error(tokenResponse); alert('Error al autenticar con Google.'); return; }
+        accessToken = tokenResponse.access_token;
+        document.getElementById('signin').style.display='none';
+        document.getElementById('signout').style.display='inline-block';
+        // Load or create the file
+        ensureDriveFile().then(()=>loadFromDrive());
+        startPolling();
+      }
+    });
+  }
+
+  function signIn(){
+    if(!tokenClient){ alert('Inicializando Google... espera unos segundos y prueba otra vez.'); return; }
+    tokenClient.requestAccessToken();
+  }
+  function signOut(){
+    accessToken=null; driveFileId=null; driveLastModified=null;
+    document.getElementById('signin').style.display='inline-block';
+    document.getElementById('signout').style.display='none';
+    stopPolling();
+    alert('Sesión cerrada (token eliminado localmente).');
+  }
+
+  // Find file by name in Drive (only in appdata or root depending on scope). We use drive.file scope so the app can create files it owns.
+  async function findFileIdByName(name){
+    const res = await gapi.client.drive.files.list({q: `name='${name.replace(/'/g, "\'")}' and trashed=false`, fields: 'files(id,name,modifiedTime)'});
+    const files = res.result.files || [];
+    return files.length? files[0] : null;
+  }
+
+  async function ensureDriveFile(){
+    const found = await findFileIdByName(FILE_NAME);
+    if(found){ driveFileId = found.id; driveLastModified = found.modifiedTime; return; }
+    // create initial file
+    const initial = {notes:[],created:new Date().toISOString()};
+    const metadata = {name: FILE_NAME, mimeType: 'application/json'};
+    const boundary = '-------pizarra-boundary-'+Math.random().toString(36).slice(2);
+    const multipartRequestBody =
+      `--${boundary}
+Content-Type: application/json; charset=UTF-8
+
+${JSON.stringify(metadata)}
+--${boundary}
+Content-Type: application/json
+
+${JSON.stringify(initial)}
+--${boundary}--`;
+    const req = await gapi.client.request({
+      path: '/upload/drive/v3/files',
+      method: 'POST',
+      params: {uploadType: 'multipart'},
+      headers: {'Content-Type': `multipart/related; boundary=${boundary}`},
+      body: multipartRequestBody
+    });
+    driveFileId = req.result.id; driveLastModified = req.result.modifiedTime;
+    console.log('Archivo creado en Drive', driveFileId);
+  }
+
+  async function saveToDriveImmediate(){
+    if(!accessToken) return; if(!driveFileId){ await ensureDriveFile(); }
+    const payload = JSON.stringify({notes, exported:new Date().toISOString()});
+    const metadata = {name: FILE_NAME, mimeType: 'application/json'};
+    const boundary = '-------pizarra-boundary-'+Math.random().toString(36).slice(2);
+    const multipartRequestBody =
+      `--${boundary}
+Content-Type: application/json; charset=UTF-8
+
+${JSON.stringify(metadata)}
+--${boundary}
+Content-Type: application/json
+
+${payload}
+--${boundary}--`;
+    const method = 'PATCH';
+    const path = `/upload/drive/v3/files/${driveFileId}`;
+    const req = await gapi.client.request({path, method, params: {uploadType: 'multipart'}, headers: {'Content-Type': `multipart/related; boundary=${boundary}`}, body: multipartRequestBody});
+    driveLastModified = req.result.modifiedTime; console.log('Guardado en Drive', driveLastModified);
+  }
+
+  async function loadFromDrive(){
+    if(!accessToken) return; if(!driveFileId){ await ensureDriveFile(); }
+    // get file content
+    const res = await gapi.client.drive.files.get({fileId: driveFileId, alt: 'media'});
+    try{ const parsed = typeof res.body === 'string' ? JSON.parse(res.body) : res.result; notes = parsed.notes||parsed; renderAllNotes(); notes = [...board.querySelectorAll('.note')].map(serializeNote); console.log('Cargado desde Drive'); }catch(e){console.error(e);}
+  }
+
+  async function checkRemoteChanges(){
+    if(!accessToken || !driveFileId) return;
+    const meta = await gapi.client.drive.files.get({fileId: driveFileId, fields: 'id,modifiedTime'});
+    const remoteModified = meta.result.modifiedTime;
+    if(driveLastModified && remoteModified && remoteModified !== driveLastModified){
+      // remote changed -> load
+      driveLastModified = remoteModified; console.log('Cambio detectado en Drive, recargando...');
+      await loadFromDrive();
+    }
+  }
+
+  function startPolling(){ if(pollingTimer) clearInterval(pollingTimer); pollingTimer = setInterval(()=>{ checkRemoteChanges(); }, pollingInterval); }
+  function stopPolling(){ if(pollingTimer) clearInterval(pollingTimer); pollingTimer=null; }
+
+  // ---- Original board logic (simplified) ----
+  const board = document.getElementById('board');
+  const addBtn = document.getElementById('add');
+  const saveBtn = document.getElementById('save');
+  const downloadBtn = document.getElementById('download');
+  const importBtn = document.getElementById('importBtn');
+  const importFile = document.getElementById('importFile');
+  const clearBtn = document.getElementById('clear');
+  const colorSelect = document.getElementById('colorSelect');
+  const fullscreenBtn = document.getElementById('fullscreen');
+  const helpBtn = document.getElementById('helpBtn');
+  const signinBtn = document.getElementById('signin');
+  const signoutBtn = document.getElementById('signout');
+
+  let notes = []; let zIndex = 1;
+  function uid(){return 'n'+Math.random().toString(36).slice(2,9)}
+  function nowISO(){return new Date().toLocaleString()}
+  function createNote(opts={}){
+    const id = opts.id || uid();
+    const note = document.createElement('article');
+    note.className = 'note ' + (opts.color || 'c-yellow');
+    note.dataset.id = id;
+    note.style.left = (opts.x!==undefined?opts.x:50)+'px';
+    note.style.top = (opts.y!==undefined?opts.y:50)+'px';
+    note.style.width = (opts.w||210)+'px';
+    note.style.height = (opts.h||140)+'px';
+    note.style.zIndex = ++zIndex;
+    note.innerHTML = `
+      <div class="meta">
+        <div class="date">${opts.created||nowISO()}</div>
+        <div class="actions"><button class="delete" title="Eliminar">✖</button></div>
+      </div>
+      <div class="content" contenteditable="true" role="textbox" aria-label="nota">${opts.html||'Nuevo hito'}</div>
+      <div class="controls">
+        <button class="pin" title="Traer adelante">📌</button>
+        <button class="resize" title="Redimensionar">⤢</button>
+      </div>
+    `;
+    board.appendChild(note); makeDraggable(note); wireNoteButtons(note);
+    notes.push(serializeNote(note)); saveToLocal(); focusContent(note.querySelector('.content')); return note;
+  }
+  function serializeNote(note){ const rect = note.getBoundingClientRect(); const boardRect = board.getBoundingClientRect(); const x = rect.left - boardRect.left; const y = rect.top - boardRect.top; return {id: note.dataset.id, x: Math.round(x), y: Math.round(y), w: Math.round(rect.width), h: Math.round(rect.height), color: [...note.classList].find(c=>c.startsWith('c-'))||'c-yellow', html: note.querySelector('.content').innerHTML, created: note.querySelector('.date').innerText } }
+
+  function makeDraggable(el){ let isPointerDown=false, startX=0, startY=0, startLeft=0, startTop=0; const content = el.querySelector('.content'); const resizeBtn = el.querySelector('.resize'); el.addEventListener('pointerdown', e=>{ if(e.target.closest('.controls') || e.target===content) return; isPointerDown=true; el.setPointerCapture(e.pointerId); el.style.zIndex = ++zIndex; startX = e.clientX; startY = e.clientY; const rect = el.getBoundingClientRect(); const boardRect = board.getBoundingClientRect(); startLeft = rect.left - boardRect.left; startTop = rect.top - boardRect.top; }); window.addEventListener('pointermove', e=>{ if(!isPointerDown) return; const dx = e.clientX - startX; const dy = e.clientY - startY; el.style.left = Math.max(6, startLeft + dx) + 'px'; el.style.top = Math.max(6, startTop + dy) + 'px'; }); window.addEventListener('pointerup', e=>{ if(!isPointerDown) return; isPointerDown=false; try{el.releasePointerCapture(e.pointerId)}catch(err){} updateNoteState(el); }); let resizing=false, rStartW=0, rStartH=0, rStartX=0, rStartY=0; resizeBtn.addEventListener('pointerdown', e=>{ e.stopPropagation(); resizing=true; rStartX=e.clientX; rStartY=e.clientY; const rect = el.getBoundingClientRect(); rStartW = rect.width; rStartH = rect.height; el.setPointerCapture(e.pointerId); }); window.addEventListener('pointermove', e=>{ if(!resizing) return; const dx=e.clientX-rStartX; const dy=e.clientY-rStartY; el.style.width = Math.max(120, rStartW + dx)+'px'; el.style.height = Math.max(80, rStartH + dy)+'px'; }); window.addEventListener('pointerup', e=>{ if(!resizing) return; resizing=false; try{el.releasePointerCapture(e.pointerId)}catch(err){}; updateNoteState(el); }); content.addEventListener('focus', ()=>{ el.style.boxShadow='0 10px 20px rgba(0,0,0,0.28)'; }); content.addEventListener('blur', ()=>{ el.style.boxShadow='0 6px 12px rgba(0,0,0,0.18)'; updateNoteState(el); }); content.addEventListener('keydown', e=>{ if(e.key==='Escape'){content.blur()} }); el.addEventListener('dragstart', e=>e.preventDefault()); }
+
+  function wireNoteButtons(note){ note.querySelector('.delete').addEventListener('click', ()=>{ if(confirm('Eliminar nota?')){ removeNote(note); } }); note.querySelector('.pin').addEventListener('click', ()=>{ note.style.zIndex = ++zIndex; updateNoteState(note); }); const dateEl = note.querySelector('.date'); dateEl.addEventListener('dblclick', ()=>{ const n=prompt('Editar texto de fecha/hito', dateEl.innerText); if(n!==null){dateEl.innerText = n; updateNoteState(note);} }); note.addEventListener('contextmenu', e=>{ e.preventDefault(); const colors = ['c-yellow','c-pink','c-green','c-blue','c-orange']; const cur = [...note.classList].find(c=>c.startsWith('c-'))||'c-yellow'; const i = colors.indexOf(cur); note.classList.remove(cur); note.classList.add(colors[(i+1)%colors.length]); updateNoteState(note); }); note.querySelector('.content').addEventListener('input', ()=>updateNoteState(note)); }
+
+  function updateNoteState(note){ const s = serializeNote(note); const idx = notes.findIndex(n=>n.id===s.id); if(idx>-1) notes[idx]=s; else notes.push(s); saveToLocal(); // and push to Drive
+    if(accessToken) debounceSaveDrive(); }
+
+  function removeNote(note){ notes = notes.filter(n=>n.id!==note.dataset.id); note.remove(); saveToLocal(); if(accessToken) debounceSaveDrive(); }
+
+  function saveToLocal(){ localStorage.setItem('pizarra_notes_v1', JSON.stringify({notes,updated:new Date().toISOString()})); }
+  function loadFromLocal(){ const raw = localStorage.getItem('pizarra_notes_v1'); if(!raw) return; try{ const data=JSON.parse(raw); notes = data.notes||[]; renderAllNotes(); }catch(e){console.warn(e);} }
+  function clearAll(){ if(!confirm('Eliminar todas las notas de esta pizarra?')) return; notes=[]; renderAllNotes(); saveToLocal(); if(accessToken) debounceSaveDrive(); }
+  function renderAllNotes(){ [...board.querySelectorAll('.note')].forEach(n=>n.remove()); notes.forEach(n=>{ createNote(n); }); notes = [...board.querySelectorAll('.note')].map(serializeNote); }
+
+  // Controls
+  addBtn.addEventListener('click', ()=>{ const color = colorSelect.value; createNote({color}); });
+  saveBtn.addEventListener('click', ()=>{ saveToLocal(); alert('Pizarra guardada en este navegador.'); });
+  downloadBtn.addEventListener('click', ()=>{ const dataStr = JSON.stringify({notes,exported:new Date().toISOString()}, null, 2); const blob = new Blob([dataStr], {type:'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'pizarra_hitos.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); });
+  importBtn.addEventListener('click', ()=>importFile.click()); importFile.addEventListener('change', e=>{ const f = e.target.files[0]; if(!f) return; const reader = new FileReader(); reader.onload = ev=>{ try{ const parsed = JSON.parse(ev.target.result); notes = parsed.notes||parsed; renderAllNotes(); saveToLocal(); alert('Importado correctamente.'); }catch(err){ alert('Archivo JSON inválido.'); } }; reader.readAsText(f); importFile.value=''; });
+  clearBtn.addEventListener('click', clearAll);
+  fullscreenBtn.addEventListener('click', ()=>{ if(!document.fullscreenElement) board.requestFullscreen?.(); else document.exitFullscreen?.(); });
+  helpBtn.addEventListener('click', ()=>{ alert('Cómo usar:
+
+- + Nuevo post-it: crea una nota
+- Doble clic en la nota para editar texto
+- Arrastra para moverla, usa el botón ⤢ para redimensionar
+- Botón Guardar: guarda en el navegador\- Descargar: descarga JSON con todas las notas\- Importar: importa JSON\- Conectar a Drive: autoriza la app y sincroniza el archivo\- Context menu (click derecho) sobre nota: cambia color\nConsejo: en la TV puedes usar el navegador integrado y seleccionar los botones con el mando.'); });
+
+  signinBtn.addEventListener('click', ()=>{ if(!CLIENT_ID || CLIENT_ID.includes('REEMPLAZAR')){ alert('Antes de conectar con Drive debes configurar CLIENT_ID en el archivo HTML (sigue las instrucciones en la sección CONFIG).'); return; } initGoogle().then(()=>{ signIn(); }).catch(e=>{console.error(e); alert('No se pudo inicializar Google APIs: revisa consola.'); }); });
+  signoutBtn.addEventListener('click', ()=>{ signOut(); });
+
+  // debounce save to drive
+  let saveTimer=null; function debounceSaveDrive(){ if(saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(()=>{ saveToDriveImmediate().catch(e=>console.error(e)); }, 800); }
+
+  // On load
+  window.addEventListener('load', ()=>{ loadFromLocal(); if(notes.length===0) createNote({x:40,y:40,html:'Simulacro "Respuesta25"
+20 Nov — Bahía de Cádiz',color:'c-yellow',created:nowISO()}); notes = [...board.querySelectorAll('.note')].map(serializeNote); });
+  window.addEventListener('keydown', e=>{ if(e.key.toLowerCase()==='n'){ createNote({color:colorSelect.value}); } if(e.key.toLowerCase()==='s' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); saveToLocal(); alert('Guardado.'); } });
+  function focusContent(el){ el.focus(); document.getSelection().selectAllChildren(el); }
+  </script>
+
+  <!--
+    INSTRUCCIONES DE CONFIGURACIÓN RÁPIDA (incluidas dentro del HTML para que siempre estén disponibles):
+
+    1) Crear credenciales OAuth en Google Cloud Console:
+       - Ve a https://console.cloud.google.com/apis/credentials
+       - Crea un nuevo proyecto (si quieres) o usa uno existente.
+       - Habilita la API de Google Drive (Library -> Google Drive API -> Enable).
+       - Crea credenciales -> OAuth client ID -> Tipo: 'Web application'.
+       - En 'Authorized JavaScript origins' agrega la URL donde vas a alojar el HTML.
+         - Si lo abres localmente en la TV con file:// no funcionará por motivos de seguridad. Recomendado: usar GitHub Pages (https://<usuario>.github.io/...), o un hosting sencillo (Netlify, Vercel, o Google Drive "public" no sirve para OAuth).
+       - Copia el Client ID y pégalo en la constante CLIENT_ID más arriba.
+
+    2) Alojar el archivo HTML:
+       - Opción simple: subir a GitHub y activarlo con GitHub Pages (sin servidor).
+       - Alternativa: Netlify/ Vercel — arrastra el archivo y te dan una URL HTTPS.
+
+    3) Abrir en Google TV:
+       - Abre el navegador de tu Google TV y navega a la URL pública (HTTPS) donde esté el HTML.
+       - Pulsa "Conectar a Drive" y autoriza con tu cuenta Google.
+
+    4) Comportamiento:
+       - Cuando edites o muevas notas, se guardará localmente y se subirá a Drive automáticamente (debounced ~800ms).
+       - Cada 15s la página comprobará si hay cambios remotos y los cargará (si detecta modificación remota).
+       - Si varios dispositivos editan al mismo tiempo, gana la última versión subida (no hay resolución de conflictos avanzado).
+
+    5) Seguridad y recomendaciones:
+       - Usa la scope 'drive.file' para que la app solo vea/gestione los archivos que crea.
+       - Si prefieres, crea un OAuth client restringido y no lo compartas.
+
+    Si quieres, puedo:
+      - Generarte el repositorio GitHub con este archivo y los pasos para activarlo en GitHub Pages.
+      - Ayudarte a crear las credenciales en la consola de Google paso a paso.
+  -->
+</body>
+</html>
