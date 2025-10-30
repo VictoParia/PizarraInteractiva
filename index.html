@@ -123,7 +123,8 @@
   function signOut(){ accessToken=null; driveFileId=null; driveLastModified=null; document.getElementById('signin').style.display='inline-block'; document.getElementById('signout').style.display='none'; stopPolling(); alert('Sesión cerrada (token eliminado localmente).'); }
 
   async function findFileIdByName(name){
-    const safe = name.replace(/'/g,"\'");
+    // escape single quotes for Drive query safely
+    const safe = name.replace(/'/g, "\'");
     const res = await gapi.client.drive.files.list({q: `name='${safe}' and trashed=false`, fields: 'files(id,name,modifiedTime)'});
     const files = res.result.files || [];
     return files.length? files[0] : null;
@@ -298,7 +299,9 @@
   importBtn.addEventListener('click', ()=>importFile.click()); importFile.addEventListener('change', e=>{ const f = e.target.files[0]; if(!f) return; const reader = new FileReader(); reader.onload = ev=>{ try{ const parsed = JSON.parse(ev.target.result); notes = parsed.notes||parsed; renderAllNotes(); saveToLocal(); alert('Importado correctamente.'); }catch(err){ alert('Archivo JSON inválido.'); } }; reader.readAsText(f); importFile.value=''; });
   clearBtn.addEventListener('click', clearAll);
   fullscreenBtn.addEventListener('click', ()=>{ if(!document.fullscreenElement) board.requestFullscreen?.(); else document.exitFullscreen?.(); });
-  helpBtn.addEventListener('click', ()=>{ alert('Cómo usar:
+  helpBtn.addEventListener('click', ()=>{
+    // use template literal to avoid unescaped newlines
+    const helpText = `Cómo usar:
 
 - + Nuevo post-it: crea una nota
 - Doble clic en la nota para editar texto
@@ -309,15 +312,26 @@
 - Conectar a Drive: autoriza la app y sincroniza el archivo
 - Context menu (click derecho) sobre nota: cambia color
 
-Consejo: en la TV puedes usar el navegador integrado y seleccionar los botones con el mando.'); });
+Consejo: en la TV puedes usar el navegador integrado y seleccionar los botones con el mando.`;
+    alert(helpText);
+  });
 
   signinBtn.addEventListener('click', ()=>{ if(!CLIENT_ID || CLIENT_ID.includes('REEMPLAZAR')){ alert('Antes de conectar con Drive debes configurar CLIENT_ID en el archivo HTML (sigue las instrucciones en la sección CONFIG).'); return; } initGoogle().then(()=>{ signIn(); }).catch(e=>{console.error(e); alert('No se pudo inicializar Google APIs: revisa consola.'); }); });
   signoutBtn.addEventListener('click', ()=>{ signOut(); });
 
   let saveTimer=null; function debounceSaveDrive(){ if(saveTimer) clearTimeout(saveTimer); saveTimer = setTimeout(()=>{ saveToDriveImmediate().catch(e=>console.error(e)); }, 800); }
 
-  window.addEventListener('load', ()=>{ loadFromLocal(); if(notes.length===0){ const example = createNote({x:40,y:40,html:'Simulacro "Respuesta25"
-20 Nov — Bahía de Cádiz',color:'c-yellow',created:nowISO()}); updateNoteState(example); } notes = [...board.querySelectorAll('.note')].map(serializeNote); });
+  window.addEventListener('load', ()=>{
+    loadFromLocal();
+    if(notes.length===0){
+      // example note using backtick to include newline safely
+      const example = createNote({x:40,y:40,html:`Simulacro "Respuesta25"
+20 Nov — Bahía de Cádiz`,color:'c-yellow',created:nowISO()});
+      updateNoteState(example);
+    }
+    notes = [...board.querySelectorAll('.note')].map(serializeNote);
+  });
+
   window.addEventListener('keydown', e=>{ if(e.key.toLowerCase()==='n'){ const note = createNote({color:colorSelect.value}); updateNoteState(note); } if(e.key.toLowerCase()==='s' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); saveToLocal(); alert('Guardado.'); } });
   function focusContent(el){ el.focus(); document.getSelection().selectAllChildren(el); }
   </script>
